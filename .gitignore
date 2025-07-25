@@ -1,0 +1,18 @@
+# Python virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Database files
+*.db
+*.sqlite3
+
+# Log files
+*.log
+gunicorn_access.log
+gunicorn_error.log
+
+# macOS specific files
+.DS_Store
