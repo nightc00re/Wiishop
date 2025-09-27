@@ -1,0 +1,21 @@
+# Compiled binary files and executables
+*.dol
+*.elf
+*.rpx
+*.rpx.bak
+*.map
+*.a
+
+# Build directories and object files
+build/
+obj/
+/debug/
+/release/
+*.o
+*.d
+
+# Temporary/Cache files
+.vscode/
+
+# Ignore actual game images and server roots for client repo
+server_root/
