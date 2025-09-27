@@ -125,14 +125,78 @@ static bool network_failed = false;
 // --- NEW FUNCTION: The client-side download logic will live here ---
 void download_game(const GameEntry *game)
 {
-    // This function will contain the net_socket, net_connect, net_write (HTTP Request)
-    // and net_recv (Data Stream) logic.
-    PrintCentre(20, "Initiating Download (Logic TBD)...");
-    PrintCentre(21, game->title);
+    // --- 1. SETUP ---
+    s32 client_socket = -1;
+    char http_request[512];
     
-    // Placeholder for actual network I/O
-    for(int i = 0; i < 50; i++) VIDEO_WaitVSync(); 
+    // We assume a server is running at a fixed IP and port 
+    // (This should be configurable in a real app, but fixed for this exercise)
+    const char *SERVER_IP = "192.168.1.100"; 
+    const u16 SERVER_PORT = 8080;
+
+    PrintCentre(18, "Connecting to server...");
+    
+    // --- 2. SOCKET AND CONNECTION ---
+    
+    // Create socket: AF_INET (Internet), SOCK_STREAM (TCP), IPPROTO_IP (IP Protocol)
+    client_socket = net_socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    
+    if (client_socket < 0) {
+        PrintCentre(19, "ERROR: Failed to create socket.");
+        for(int i = 0; i < 180; i++) VIDEO_WaitVSync(); // Pause
+        return;
+    }
+
+    struct sockaddr_in server_addr;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(SERVER_PORT);
+    server_addr.sin_addr.s_addr = inet_addr(SERVER_IP);
+
+    if (net_connect(client_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        PrintCentre(19, "ERROR: Failed to connect to server.");
+        PrintCentre(20, SERVER_IP);
+        net_close(client_socket);
+        for(int i = 0; i < 180; i++) VIDEO_WaitVSync(); // Pause
+        return;
+    }
+
+    // --- 3. SEND HTTP GET REQUEST ---
+    
+    // Create filename based on game ID (e.g., "RMCE01.wbfs")
+    char filename[16];
+    sprintf(filename, "%s.wbfs", game->id);
+
+    // Format a simple HTTP/1.0 GET request
+    sprintf(http_request, 
+            "GET /%s HTTP/1.0\r\nHost: %s\r\n\r\n", 
+            filename, 
+            SERVER_IP);
+
+    PrintCentre(19, "Sending request for file:");
+    PrintCentre(20, filename);
+
+    if (net_write(client_socket, http_request, strlen(http_request)) < 0) {
+        PrintCentre(21, "ERROR: Failed to send request.");
+        net_close(client_socket);
+        for(int i = 0; i < 180; i++) VIDEO_WaitVSync(); // Pause
+        return;
+    }
+    
+    PrintCentre(21, "Request sent. Waiting for response...");
+
+    // This is where the file receiving logic (net_read/net_recv) will go in the next step.
+    
+    // Placeholder to keep the connection open briefly for testing
+    for(int i = 0; i < 60; i++) VIDEO_WaitVSync(); 
+    
+    net_close(client_socket);
+    PrintCentre(22, "Connection closed. Download logic TBD.");
+
+    // Clear messages after a short delay
+    for(int i = 0; i < 120; i++) VIDEO_WaitVSync(); 
 }
+// ------------------------------------------------------------------
 // ------------------------------------------------------------------
 
 int main(int argc,char **argv)
