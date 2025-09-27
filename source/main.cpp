@@ -3,17 +3,19 @@
 #include <stdarg.h>
 #include <ogc/console.h>
 #include <ogc/system.h>
-#include <time.h>
+#include <time.h> // Required for struct timeval
 #include <stdlib.h>
 #include <gccore.h>
 #include <gctypes.h>
 #include <wiiuse/wpad.h>
 #include <string.h>
 #include <fat.h>
-#include <network.h> // *** NEW: Required for net_init() and if_config() ***
+#include <network.h> // Required for net_init() and if_config()
+#include <sdcard/wiisd_io.h> // Required for __io_wiisd
 
 #define TEXTWIN_W 80
 #define TEXTWIN_H 60
+#define CONNECT_TIMEOUT_SEC 10 // 10 seconds timeout
 
 // --- GAME DATA STRUCTURE AND LIST ---
 #define MAX_GAMES 10
@@ -122,30 +124,48 @@ static char permanent_status_msg[80] = "Waiting for network...";
 static bool network_failed = false;
 
 
-// --- NEW FUNCTION: The client-side download logic will live here ---
+// --- NEW FUNCTION: The client-side download logic will live here (FINAL VERSION with TIMEOUT and improved HEADER PARSING) ---
 void download_game(const GameEntry *game)
 {
     // --- 1. SETUP ---
     s32 client_socket = -1;
     char http_request[512];
     
-    // We assume a server is running at a fixed IP and port 
-    // (This should be configurable in a real app, but fixed for this exercise)
-    const char *SERVER_IP = "192.168.1.100"; 
+    // Assumed server location
+    // We assume the user has corrected this to their actual IP (e.g., 192.168.1.79)
+    const char *SERVER_IP = "192.168.1.79"; 
     const u16 SERVER_PORT = 8080;
-
+    
+    // Buffers for network traffic and file saving
+    char recv_buffer[4096];
+    FILE *fp = NULL;
+    int bytes_read = 0;
+    int file_bytes_received = 0;
+    
+    // Buffer for building the header across multiple reads if necessary
+    char header_buffer[4096 * 2] = {0}; // 8KB header buffer (should be plenty)
+    int header_bytes_read = 0;
+    
+    bool header_parsed = false;
+    
     PrintCentre(18, "Connecting to server...");
     
-    // --- 2. SOCKET AND CONNECTION ---
+    // --- 2. SOCKET, TIMEOUT, AND CONNECTION ---
     
-    // Create socket: AF_INET (Internet), SOCK_STREAM (TCP), IPPROTO_IP (IP Protocol)
     client_socket = net_socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-    
     if (client_socket < 0) {
         PrintCentre(19, "ERROR: Failed to create socket.");
-        for(int i = 0; i < 180; i++) VIDEO_WaitVSync(); // Pause
+        for(int i = 0; i < 180; i++) VIDEO_WaitVSync(); 
         return;
     }
+
+    // SET THE 10-SECOND TIMEOUT OPTION
+    struct timeval tv;
+    tv.tv_sec = CONNECT_TIMEOUT_SEC;
+    tv.tv_usec = 0; 
+    
+    net_setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    net_setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     struct sockaddr_in server_addr;
     memset(&server_addr, 0, sizeof(server_addr));
@@ -154,20 +174,20 @@ void download_game(const GameEntry *game)
     server_addr.sin_addr.s_addr = inet_addr(SERVER_IP);
 
     if (net_connect(client_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        PrintCentre(19, "ERROR: Failed to connect to server.");
+        PrintCentre(19, "ERROR: Connect failed/timed out!");
         PrintCentre(20, SERVER_IP);
         net_close(client_socket);
-        for(int i = 0; i < 180; i++) VIDEO_WaitVSync(); // Pause
+        for(int i = 0; i < 180; i++) VIDEO_WaitVSync();
         return;
     }
 
     // --- 3. SEND HTTP GET REQUEST ---
     
-    // Create filename based on game ID (e.g., "RMCE01.wbfs")
+    char filepath[64]; // Path on SD card (e.g., "sd:/wbfs/RMCE01.wbfs")
     char filename[16];
     sprintf(filename, "%s.wbfs", game->id);
+    sprintf(filepath, "sd:/wbfs/%s", filename);
 
-    // Format a simple HTTP/1.0 GET request
     sprintf(http_request, 
             "GET /%s HTTP/1.0\r\nHost: %s\r\n\r\n", 
             filename, 
@@ -179,24 +199,94 @@ void download_game(const GameEntry *game)
     if (net_write(client_socket, http_request, strlen(http_request)) < 0) {
         PrintCentre(21, "ERROR: Failed to send request.");
         net_close(client_socket);
-        for(int i = 0; i < 180; i++) VIDEO_WaitVSync(); // Pause
+        for(int i = 0; i < 180; i++) VIDEO_WaitVSync();
         return;
     }
     
-    PrintCentre(21, "Request sent. Waiting for response...");
+    PrintCentre(21, "Request sent. Waiting for data...");
 
-    // This is where the file receiving logic (net_read/net_recv) will go in the next step.
+    // --- 4. RECEIVE AND SAVE FILE DATA (IMPROVED HEADER PARSING) ---
     
-    // Placeholder to keep the connection open briefly for testing
-    for(int i = 0; i < 60; i++) VIDEO_WaitVSync(); 
+    // Ensure the required 'wbfs' directory exists on the SD card
+    fatMountSimple("sd", &__io_wiisd); 
+    mkdir("sd:/wbfs", 0777); 
     
-    net_close(client_socket);
-    PrintCentre(22, "Connection closed. Download logic TBD.");
+    // Open file for writing on the SD card
+    fp = fopen(filepath, "wb");
+    if (fp == NULL) {
+        PrintCentre(22, "ERROR: Could not create file on SD!");
+        net_close(client_socket);
+        for(int i = 0; i < 180; i++) VIDEO_WaitVSync();
+        return;
+    }
 
-    // Clear messages after a short delay
-    for(int i = 0; i < 120; i++) VIDEO_WaitVSync(); 
+    // Loop to read data from the socket and write to the file
+    while ((bytes_read = net_read(client_socket, recv_buffer, sizeof(recv_buffer))) > 0) {
+        
+        if (!header_parsed) {
+            // Append new data to the header buffer
+            if (header_bytes_read + bytes_read < sizeof(header_buffer)) {
+                memcpy(header_buffer + header_bytes_read, recv_buffer, bytes_read);
+                header_bytes_read += bytes_read;
+                
+                // Try to find the end of the HTTP header (empty line: \r\n\r\n)
+                char *body_start = strstr(header_buffer, "\r\n\r\n");
+
+                if (body_start) {
+                    // Header found! Write the remaining data (the actual body) to file.
+                    int header_len = (body_start - header_buffer) + 4; 
+                    int data_len = header_bytes_read - header_len;
+                    
+                    if (data_len > 0) {
+                         // Write the file data portion from the header_buffer
+                        fwrite(body_start + 4, 1, data_len, fp);
+                        file_bytes_received += data_len;
+                    }
+                    header_parsed = true;
+                }
+            } else {
+                 // Header buffer overflow (highly unlikely for simple server, but safe)
+                 PrintCentre(22, "ERROR: Header too large!");
+                 break;
+            }
+        } else {
+            // Header already parsed, write all data directly to the file.
+            fwrite(recv_buffer, 1, bytes_read, fp);
+            file_bytes_received += bytes_read;
+        }
+
+        // Display simple progress (in KB)
+        sprintf(recv_buffer, "Downloaded: %d KB...", file_bytes_received / 1024);
+        PrintCentre(22, recv_buffer);
+        VIDEO_WaitVSync(); // Yield control to the system during download
+    }
+
+    // --- 5. CLEANUP AND COMPLETION ---
+    
+   // Check if the read loop ended due to an error (bytes_read < 0)
+    if (bytes_read < 0) {
+        // We cannot use net_getlasterror() without an explicit declaration.
+        // Assume any read error is a failure (e.g., timeout, connection reset).
+        PrintCentre(22, "Download failed (Net Read Error)!");
+    } else {
+        // Successful completion (bytes_read == 0)
+        sprintf(recv_buffer, "Download complete: %d KB saved.", file_bytes_received / 1024);
+        PrintCentre(22, recv_buffer);
+    }
+    
+    if (fp) fclose(fp); // Close the file stream
+    if (client_socket >= 0) net_close(client_socket); // Close the socket
+    
+    // Wait for the user to see the result before clearing
+    for(int i = 0; i < 300; i++) VIDEO_WaitVSync(); 
+
+    // Clear the download status area
+    PrintCentre(18, "                                  "); 
+    PrintCentre(19, "                                  "); 
+    PrintCentre(20, "                                  "); 
+    PrintCentre(21, "                                  "); 
+    PrintCentre(22, "Press A to Download | Press HOME to Exit");
 }
-// ------------------------------------------------------------------
 // ------------------------------------------------------------------
 
 int main(int argc,char **argv)
