@@ -29,7 +29,7 @@ typedef struct {
 
 // --- INITIAL 10 FIRST-PARTY GAME LIST ---
 GameEntry game_list[MAX_GAMES] = {
-    {"Mario Kart Wii", "RMCE01", 3758096384ULL, false},
+    {"Mario Kart Wii", "RMCE01", 2776629248ULL, false},
     {"New Super Mario Bros. Wii", "SMNP01", 4613734144ULL, false},
     {"Super Mario Galaxy", "SMGE01", 3758096384ULL, false},
     {"Super Smash Bros. Brawl", "RSBE01", 7922432000ULL, true},
@@ -38,7 +38,7 @@ GameEntry game_list[MAX_GAMES] = {
     {"Donkey Kong Country Returns", "RMKE01", 4613734144ULL, false},
     {"Metroid Prime 3: Corruption", "RM3E01", 4294967296ULL, false},
     {"Super Mario Galaxy 2", "SMQJ01", 4000000000ULL, false},
-    {"Mario Party 8", "RM8E01", 3500000000ULL, false}
+    {"Test Download 50MB", "TEST01", 52428800ULL, false}, // 52,428,800 bytes = 50 MB
 };
 // ---------------------------------------
 
@@ -124,46 +124,54 @@ static char permanent_status_msg[80] = "Waiting for network...";
 static bool network_failed = false;
 
 
-// --- NEW FUNCTION: The client-side download logic will live here (FINAL VERSION with TIMEOUT and improved HEADER PARSING) ---
+// --- NEW FUNCTION: The client-side download logic (FIXED FOR COMPILATION AND HANG) ---
 void download_game(const GameEntry *game)
 {
-    // --- 1. SETUP ---
+    // --- 1. SETUP & ALL VARIABLE DECLARATIONS (MOVED TO TOP FOR GOTO COMPLIANCE) ---
     s32 client_socket = -1;
-    char http_request[512];
     
-    // Assumed server location
-    // We assume the user has corrected this to their actual IP (e.g., 192.168.1.79)
+    // Assumed server location (Update if necessary)
     const char *SERVER_IP = "192.168.1.79"; 
     const u16 SERVER_PORT = 8080;
     
-    // Buffers for network traffic and file saving
+    // Buffers and Logic
     char recv_buffer[4096];
+    char http_request[512];
     FILE *fp = NULL;
     int bytes_read = 0;
-    int file_bytes_received = 0;
     
-    // Buffer for building the header across multiple reads if necessary
-    char header_buffer[4096 * 2] = {0}; // 8KB header buffer (should be plenty)
+    // Total file size for progress bar calculation
+    u64 file_total_size = game->size_bytes; 
+    u64 file_bytes_received = 0;
+
+    // --- VARIABLES RELATED TO HEADER PARSING MOVED HERE (Fixes the C++ goto error) ---
+    char header_buffer[4096 * 2] = {0}; 
     int header_bytes_read = 0;
+    char *body_start = NULL;
+    int header_len = 0; 
+    int data_len = 0; 
     
-    bool header_parsed = false;
-    
+    // Paths
+    char filepath[64];
+    sprintf(filepath, "sd:/wbfs/%s.wbfs", game->id);
+    // --- END VARIABLE MOVEMENT ---
+
+    // ADD THE DISPLAY BUFFER HERE (around line 167 of the final code block)
+    char display_buffer[80]; 
+
     PrintCentre(18, "Connecting to server...");
     
-    // --- 2. SOCKET, TIMEOUT, AND CONNECTION ---
-    
+    // --- 2. SOCKET, TIMEOUT, AND CONNECTION (NO CHANGES HERE) ---
     client_socket = net_socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-    if (client_socket < 0) {
+    if (client_socket < 0) { 
         PrintCentre(19, "ERROR: Failed to create socket.");
         for(int i = 0; i < 180; i++) VIDEO_WaitVSync(); 
         return;
     }
 
-    // SET THE 10-SECOND TIMEOUT OPTION
     struct timeval tv;
     tv.tv_sec = CONNECT_TIMEOUT_SEC;
     tv.tv_usec = 0; 
-    
     net_setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     net_setsockopt(client_socket, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
@@ -176,108 +184,112 @@ void download_game(const GameEntry *game)
     if (net_connect(client_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         PrintCentre(19, "ERROR: Connect failed/timed out!");
         PrintCentre(20, SERVER_IP);
-        net_close(client_socket);
-        for(int i = 0; i < 180; i++) VIDEO_WaitVSync();
-        return;
+        goto cleanup; 
     }
 
-    // --- 3. SEND HTTP GET REQUEST ---
+    // --- 3. SEND FULL HTTP GET REQUEST (NO CHANGES HERE) ---
     
-    char filepath[64]; // Path on SD card (e.g., "sd:/wbfs/RMCE01.wbfs")
-    char filename[16];
-    sprintf(filename, "%s.wbfs", game->id);
-    sprintf(filepath, "sd:/wbfs/%s", filename);
-
-    sprintf(http_request, 
-            "GET /%s HTTP/1.0\r\nHost: %s\r\n\r\n", 
-            filename, 
-            SERVER_IP);
-
+    sprintf(http_request, "GET /%s.wbfs HTTP/1.0\r\nHost: %s\r\n\r\n", game->id, SERVER_IP);
+    
     PrintCentre(19, "Sending request for file:");
-    PrintCentre(20, filename);
+    PrintCentre(20, game->id);
 
     if (net_write(client_socket, http_request, strlen(http_request)) < 0) {
         PrintCentre(21, "ERROR: Failed to send request.");
-        net_close(client_socket);
-        for(int i = 0; i < 180; i++) VIDEO_WaitVSync();
-        return;
+        goto cleanup; 
     }
     
     PrintCentre(21, "Request sent. Waiting for data...");
 
-    // --- 4. RECEIVE AND SAVE FILE DATA (IMPROVED HEADER PARSING) ---
+    // --- 4. RECEIVE AND STRIP HTTP HEADER (FIXED LOGIC) ---
     
-    // Ensure the required 'wbfs' directory exists on the SD card
     fatMountSimple("sd", &__io_wiisd); 
     mkdir("sd:/wbfs", 0777); 
     
-    // Open file for writing on the SD card
-    fp = fopen(filepath, "wb");
+    fp = fopen(filepath, "wb"); 
     if (fp == NULL) {
         PrintCentre(22, "ERROR: Could not create file on SD!");
-        net_close(client_socket);
-        for(int i = 0; i < 180; i++) VIDEO_WaitVSync();
-        return;
+        goto cleanup; 
     }
 
-    // Loop to read data from the socket and write to the file
-    while ((bytes_read = net_read(client_socket, recv_buffer, sizeof(recv_buffer))) > 0) {
+    // --- A. Read until the end of the header is found ---
+    while (!body_start) {
+        char chunk[1024];
+        int chunk_read = net_read(client_socket, chunk, sizeof(chunk));
         
-        if (!header_parsed) {
-            // Append new data to the header buffer
-            if (header_bytes_read + bytes_read < sizeof(header_buffer)) {
-                memcpy(header_buffer + header_bytes_read, recv_buffer, bytes_read);
-                header_bytes_read += bytes_read;
-                
-                // Try to find the end of the HTTP header (empty line: \r\n\r\n)
-                char *body_start = strstr(header_buffer, "\r\n\r\n");
-
-                if (body_start) {
-                    // Header found! Write the remaining data (the actual body) to file.
-                    int header_len = (body_start - header_buffer) + 4; 
-                    int data_len = header_bytes_read - header_len;
-                    
-                    if (data_len > 0) {
-                         // Write the file data portion from the header_buffer
-                        fwrite(body_start + 4, 1, data_len, fp);
-                        file_bytes_received += data_len;
-                    }
-                    header_parsed = true;
-                }
-            } else {
-                 // Header buffer overflow (highly unlikely for simple server, but safe)
-                 PrintCentre(22, "ERROR: Header too large!");
-                 break;
-            }
-        } else {
-            // Header already parsed, write all data directly to the file.
-            fwrite(recv_buffer, 1, bytes_read, fp);
-            file_bytes_received += bytes_read;
+        if (chunk_read <= 0) {
+             PrintCentre(22, "ERROR: Failed to receive full header data!");
+             goto cleanup; 
         }
 
-        // Display simple progress (in KB)
-        sprintf(recv_buffer, "Downloaded: %d KB...", file_bytes_received / 1024);
-        PrintCentre(22, recv_buffer);
-        VIDEO_WaitVSync(); // Yield control to the system during download
+        if (header_bytes_read + chunk_read > (int)sizeof(header_buffer)) {
+             PrintCentre(22, "ERROR: Header too large!");
+             goto cleanup;
+        }
+
+        memcpy(header_buffer + header_bytes_read, chunk, chunk_read);
+        header_bytes_read += chunk_read;
+        
+        body_start = strstr(header_buffer, "\r\n\r\n");
+    }
+
+    // --- B. Extract and Write Initial File Data ---
+    header_len = (body_start - header_buffer) + 4; 
+    data_len = header_bytes_read - header_len;     
+
+    if (data_len > 0) {
+        fwrite(body_start + 4, 1, data_len, fp);
+        file_bytes_received += data_len;
+    }
+    
+    PrintCentre(21, "Download started..."); 
+
+    // --- C. MAIN DOWNLOAD LOOP (STREAM DATA BODY ONLY) ---
+    while ((bytes_read = net_read(client_socket, recv_buffer, sizeof(recv_buffer))) > 0) {
+        
+        fwrite(recv_buffer, 1, bytes_read, fp);
+        file_bytes_received += bytes_read;
+
+        // *** HANG FIX: Check if we've received the expected amount of data ***
+        if (file_bytes_received >= file_total_size) {
+            PrintCentre(22, "NOTICE: Received expected file size. Breaking read loop.");
+            break; // Forcefully break out of the loop
+        }
+        
+        // --- PROGRESS BAR LOGIC (UNCHANGED) ---
+        if (file_total_size > 0) {
+            int percent = (int)(((u64)file_bytes_received * 100) / file_total_size);
+            if (percent > 100) percent = 100;
+
+            int blocks = (percent * 40) / 100;
+            char progress_bar[41];
+            memset(progress_bar, '#', blocks);
+            memset(progress_bar + blocks, '-', 40 - blocks);
+            progress_bar[40] = '\0'; 
+
+            sprintf(display_buffer, "%3d%% | [%s]", percent, progress_bar);
+            PrintCentre(22, display_buffer);
+        } else {
+            sprintf(display_buffer, "Downloaded: %llu KB...", file_bytes_received / 1024);
+           PrintCentre(22, display_buffer);
+        }
+        
+        VIDEO_WaitVSync(); 
     }
 
     // --- 5. CLEANUP AND COMPLETION ---
+    cleanup:
     
-   // Check if the read loop ended due to an error (bytes_read < 0)
     if (bytes_read < 0) {
-        // We cannot use net_getlasterror() without an explicit declaration.
-        // Assume any read error is a failure (e.g., timeout, connection reset).
         PrintCentre(22, "Download failed (Net Read Error)!");
     } else {
-        // Successful completion (bytes_read == 0)
-        sprintf(recv_buffer, "Download complete: %d KB saved.", file_bytes_received / 1024);
+        sprintf(recv_buffer, "Download complete: %llu KB saved.", file_bytes_received / 1024);
         PrintCentre(22, recv_buffer);
     }
     
-    if (fp) fclose(fp); // Close the file stream
-    if (client_socket >= 0) net_close(client_socket); // Close the socket
+    if (fp) fclose(fp); 
+    if (client_socket >= 0) net_close(client_socket); 
     
-    // Wait for the user to see the result before clearing
     for(int i = 0; i < 300; i++) VIDEO_WaitVSync(); 
 
     // Clear the download status area
