@@ -6,7 +6,7 @@ Wiishop is an application designed to streamline the process of downloading and 
 
 ---
 
-## 🚀 Features
+## Features
 
 * **Direct-to-USB Installation:** Downloads game data directly onto the user's USB storage device.
 * **WBFS Compatibility:** Writes files in the **WBFS format** (and handles splitting large files for FAT32) to ensure games are recognized by **USB Loader GX** and other standard loaders.
@@ -42,12 +42,11 @@ To ensure full compatibility with USB Loader GX, the application must perform th
 3.  **WBFS Formatting:** Use the **`libwbfs`** library to convert the incoming stream, create the necessary directory structure (`usb:/wbfs/Game Title [GAMEID]/`), and write the data to the USB. This must handle files larger than 4GB by splitting them (e.g., into `.wbfs` and `.wbf1` chunks) if the drive is FAT32.
 4.  **Server Address:** The current target server is running at `http://[M1_MACBOOK_IP]:[PORT]`.
 
-### Next Steps
-
-* [ ] Implement network initialization and HTTP GET request handling.
-* [ ] Integrate `libfat` and ensure reliable USB writing.
-* [ ] Integrate `libwbfs` for proper WBFS creation and file splitting.
-* [ ] Design and implement the basic menu/UI (e.g., in GRRLIB or libwiigui) to display available games.
+## Install using dolphin emulator
+Git clone repository
+-CD into the source build
+-Run "Make install" and Make command
+-Note: Devkitpro must be installed onto machine. Insturctons and documentation are avaliable on the devkitpro wiki
 
 ---
 
